@@ -56,6 +56,7 @@ class Redis_Utilities:
     def read_each(self, prefix):
         """
         Continuously yield new Redis entries matching the given prefix as dicts.
+        Prefix should be <prefix>:<instrument>
 
         Args:
             prefix (str): Key prefix to scan for.
@@ -66,7 +67,7 @@ class Redis_Utilities:
         seen = set()
         while True:
             time.sleep(0.1)
-            for key in self.redis_db.scan_iter(f"{prefix}"):
+            for key in self.redis_db.scan_iter(f"{prefix}:*"):
                 if key not in seen:
                     seen.add(key)
                     raw = self.redis_db.get(key)
@@ -80,6 +81,7 @@ class Redis_Utilities:
     def write(self, prefix, value):
         """
         Write a dict value to Redis with a generated key using the given prefix.
+        Prefix should be <prefix>:<instrument>
 
         Args:
             prefix (str): Key prefix for the entry.
@@ -87,6 +89,20 @@ class Redis_Utilities:
         """
         assert isinstance(value, dict)
         self.redis_db.set(f"{prefix}:{uuid.uuid4().hex[:8]}", json.dumps(value), ex=self.ttl)
+
+    def clear(self, prefix):
+        """
+        Delete all Redis keys matching the given prefix.
+        Prefix should be <prefix>:<instrument>
+
+        Args:
+            prefix (str): Key prefix to scan for and delete.
+        """
+        for key in self.redis_db.scan_iter(f"{prefix}:*"):
+            try:
+                self.redis_db.delete(key)
+            except Exception as e:
+                print(f"Error deleting key={key}: {e}")
 
 class TimeBasedMovement:
 

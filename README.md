@@ -113,4 +113,4 @@ python3 -m twine upload dist/*
 python3 -m pip install --upgrade --force-reinstall aia-utilities
 
 ls -la dist   
-rm dist/*0.1.2*
+rm dist/*0.1.4*

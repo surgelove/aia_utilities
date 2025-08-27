@@ -28,6 +28,7 @@ class Redis_Utilities:
         self.db = db
         self.ttl = ttl
         self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
+        self.seen = set()
 
     def read_all(self, prefix, order=True):
         """
@@ -40,10 +41,10 @@ class Redis_Utilities:
         Returns:
             list: List of dicts sorted by 'timestamp'.
         """
-        seen = set()
+
         items = []
-        for key in self.redis_db.scan_iter(f"{prefix}"):
-            seen.add(key)
+        for key in self.redis_db.scan_iter(f"{prefix}:*"):
+            self.seen.add(key)
             raw = self.redis_db.get(key)
             try:
                 data = json.loads(raw)
@@ -64,12 +65,11 @@ class Redis_Utilities:
         Yields:
             dict: Newly found Redis entry as a dict.
         """
-        seen = set()
         while True:
             time.sleep(0.1)
             for key in self.redis_db.scan_iter(f"{prefix}:*"):
-                if key not in seen:
-                    seen.add(key)
+                if key not in self.seen:
+                    self.seen.add(key)
                     raw = self.redis_db.get(key)
                     try:
                         data = json.loads(raw)

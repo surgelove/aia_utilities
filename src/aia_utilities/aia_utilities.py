@@ -1,68 +1,92 @@
 import json
 import redis
 import time
-
+import uuid
+from datetime import datetime
+import subprocess
+import threading
+import pandas as pd
+import pytz
 
 class Redis_Utilities:
+    """
+    Utility class for interacting with Redis, including reading and writing JSON entries.
+    """
 
-    def __init__(self, host='localhost', port=6379, db=0):
+    def __init__(self, host='localhost', port=6379, db=0, ttl=120):
+        """
+        Initialize the Redis_Utilities instance.
+
+        Args:
+            host (str): Redis server host.
+            port (int): Redis server port.
+            db (int): Redis database number.
+            ttl (int): Time-to-live for written keys in seconds.
+        """
         self.host = host
         self.port = port
         self.db = db
+        self.ttl = ttl
+        self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
 
     def read_all(self, prefix, order=True):
+        """
+        Read all Redis entries matching the given prefix, returning them as a sorted list of dicts.
 
-        r = redis.Redis(host=self.host, port=self.port, db=self.db)
+        Args:
+            prefix (str): Key prefix to scan for.
+            order (bool): If True, sort results by 'timestamp'.
 
-        # read existing keys and track seen ones
+        Returns:
+            list: List of dicts sorted by 'timestamp'.
+        """
         seen = set()
         items = []
-        for key in r.scan_iter(f"{prefix}"):
+        for key in self.redis_db.scan_iter(f"{prefix}"):
             seen.add(key)
-            raw = r.get(key)
-            if raw is None:
-                continue
-            # Convert raw JSON to dict
+            raw = self.redis_db.get(key)
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
                 print(f" JSON decode error for key={key}: {e}")
-                continue
-
             items.append(data)
-
-        # Sort items based on timestamp in the dict if requested
-        if order:
-            try:
-                items.sort(key=lambda x: x["timestamp"])
-            except Exception:
-                pass
-
+        items.sort(key=lambda x: x["timestamp"])
         return items
 
     def read_each(self, prefix):
-        r = redis.Redis(host=self.host, port=self.port, db=self.db)
+        """
+        Continuously yield new Redis entries matching the given prefix as dicts.
+
+        Args:
+            prefix (str): Key prefix to scan for.
+
+        Yields:
+            dict: Newly found Redis entry as a dict.
+        """
         seen = set()
         while True:
             time.sleep(0.1)
-            for key in r.scan_iter(f"{prefix}"):
+            for key in self.redis_db.scan_iter(f"{prefix}"):
                 if key not in seen:
                     seen.add(key)
-                    raw = r.get(key)
-                    if raw is None:
-                        continue
+                    raw = self.redis_db.get(key)
                     try:
                         data = json.loads(raw)
-                        yield data  # Send each new entry back to caller
+                        yield data
                     except json.JSONDecodeError as e:
                         print(f"JSON decode error for key={key}: {e}")
                         continue
 
+    def write(self, prefix, value):
+        """
+        Write a dict value to Redis with a generated key using the given prefix.
 
-    def write(self, key, value):
-        r = redis.Redis(host=self.host, port=self.port, db=self.db)
-        r.set(key, json.dumps(value))
-
+        Args:
+            prefix (str): Key prefix for the entry.
+            value (dict): Value to store as JSON.
+        """
+        assert isinstance(value, dict)
+        self.redis_db.set(f"{prefix}:{uuid.uuid4().hex[:8]}", json.dumps(value), ex=self.ttl)
 
 class TimeBasedMovement:
 
@@ -212,3 +236,7 @@ def updown(direction):
         str or None: 'up', 'down', or None for no movement.
     """
     return "up" if direction > 0 else "down" if direction < 0 else None
+
+
+
+

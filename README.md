@@ -99,8 +99,8 @@ __init__py
 setup.cfg
 
 git add setup.cfg src/aia_utilities/__init__.py
-git commit -m "Bump version to 0.1.5"
-git tag v0.1.5
+git commit -m "Bump version to 0.1.6"
+git tag v0.1.6
 git push && git push --tags
 
 python3 -m pip install --upgrade build twine
@@ -113,4 +113,4 @@ python3 -m twine upload dist/*
 python3 -m pip install --upgrade --force-reinstall aia-utilities
 
 ls -la dist   
-rm dist/*0.1.4*
+rm dist/*0.1.5*

@@ -13,7 +13,7 @@ class Redis_Utilities:
     Utility class for interacting with Redis, including reading and writing JSON entries.
     """
 
-    def __init__(self, host='localhost', port=6379, db=0, ttl=120):
+    def __init__(self, host='localhost', port=6379, db=0, ttl=120, stream_maxlen=10000):
         """
         Initialize the Redis_Utilities instance.
 
@@ -28,7 +28,9 @@ class Redis_Utilities:
         self.db = db
         self.ttl = ttl
         self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
-        self.seen = set()
+        # This utility uses Redis Streams (XADD/XREAD/XRANGE) exclusively.
+        # stream_maxlen controls approximate trimming when writing.
+        self.stream_maxlen = stream_maxlen
 
     def read_all(self, prefix, order=True):
         """
@@ -42,16 +44,42 @@ class Redis_Utilities:
             list: List of dicts sorted by 'timestamp'.
         """
 
+        """
+        Read all entries from the Redis Stream named `prefix` using XRANGE.
+
+        Returns a list of dicts parsed from the stream 'data' field. If
+        `order` is True and a 'timestamp' field exists it will sort by it
+        (XRANGE already returns entries in ID order).
+        """
         items = []
-        for key in self.redis_db.scan_iter(f"{prefix}:*"):
-            self.seen.add(key)
-            raw = self.redis_db.get(key)
+        try:
+            entries = self.redis_db.xrange(prefix, min='-', max='+')
+        except Exception as e:
+            print(f"Error reading stream {prefix}: {e}")
+            return items
+
+        for entry_id, fields in entries:
+            # fields can be {b'data': b'...'} or {'data': '...'} depending on client
+            raw = fields.get(b'data') or fields.get('data')
+            if raw is None:
+                continue
+            if isinstance(raw, bytes):
+                raw = raw.decode()
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
-                print(f" JSON decode error for key={key}: {e}")
+                print(f"JSON decode error for stream entry {entry_id}: {e}")
+                continue
+            # attach id in case caller wants it
+            data.setdefault('_id', entry_id)
             items.append(data)
-        items.sort(key=lambda x: x["timestamp"])
+
+        if order:
+            try:
+                items.sort(key=lambda x: x.get('timestamp', ''))
+            except Exception:
+                pass
+
         return items
 
     def read_each(self, prefix):
@@ -65,18 +93,38 @@ class Redis_Utilities:
         Yields:
             dict: Newly found Redis entry as a dict.
         """
+        """
+        Continuously yield new entries from the Redis Stream named `prefix`.
+
+        This uses XREAD to block for new entries. It starts at '0-0' which
+        will emit existing entries first; if you want only new entries use
+        'last_id="$"' when calling this function externally and adapt as
+        needed. Returned items are decoded JSON dicts.
+        """
+        last_id = '0-0'
         while True:
-            time.sleep(0.1)
-            for key in self.redis_db.scan_iter(f"{prefix}:*"):
-                if key not in self.seen:
-                    self.seen.add(key)
-                    raw = self.redis_db.get(key)
-                    try:
-                        data = json.loads(raw)
+            try:
+                # block for up to 1000ms waiting for new entries
+                resp = self.redis_db.xread({prefix: last_id}, block=1000)
+                if not resp:
+                    continue
+                for stream_key, entries in resp:
+                    for entry_id, fields in entries:
+                        raw = fields.get(b'data') or fields.get('data')
+                        if raw is None:
+                            continue
+                        if isinstance(raw, bytes):
+                            raw = raw.decode()
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError as e:
+                            print(f"JSON decode error for stream entry {entry_id}: {e}")
+                            continue
+                        last_id = entry_id
                         yield data
-                    except json.JSONDecodeError as e:
-                        print(f"JSON decode error for key={key}: {e}")
-                        continue
+            except Exception as e:
+                print(f"Error reading stream {prefix}: {e}")
+                time.sleep(0.5)
 
     def write(self, prefix, value):
         """
@@ -88,21 +136,180 @@ class Redis_Utilities:
             value (dict): Value to store as JSON.
         """
         assert isinstance(value, dict)
-        self.redis_db.set(f"{prefix}:{uuid.uuid4().hex[:8]}", json.dumps(value), ex=self.ttl)
+        try:
+            # store JSON in the 'data' field; approximate trimming to keep stream size bounded
+            self.redis_db.xadd(prefix, {'data': json.dumps(value)}, maxlen=self.stream_maxlen, approximate=True)
+        except Exception as e:
+            print(f"Error writing to stream {prefix}: {e}")
 
-    def clear(self, prefix):
+
+    def show(self, prefix=None):
         """
-        Delete all Redis keys matching the given prefix.
-        Prefix should be <prefix>:<instrument>
+        Inspect Redis and print keys and stream information.
 
         Args:
-            prefix (str): Key prefix to scan for and delete.
+            prefix (str|None): Optional prefix to filter keys (pattern prefix*). If None lists all keys.
+
+        Returns:
+            list: List of dicts with key metadata (key, type, ttl, stream length, sample entries).
         """
-        for key in self.redis_db.scan_iter(f"{prefix}:*"):
+        pattern = f"{prefix}*" if prefix else "*"
+        results = []
+        try:
+            for key in self.redis_db.scan_iter(pattern):
+                try:
+                    key_str = key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
+                    t = self.redis_db.type(key)
+                    if isinstance(t, bytes):
+                        t = t.decode()
+                    ttl = None
+                    try:
+                        ttl = self.redis_db.ttl(key)
+                    except Exception:
+                        pass
+
+                    info = {"key": key_str, "type": t, "ttl": ttl}
+
+                    if t == 'stream':
+                        # stream metadata
+                        try:
+                            length = self.redis_db.xlen(key)
+                        except Exception:
+                            length = None
+                        info['length'] = length
+                        # also expose 'items' as a semantic alias for number of entries
+                        info['items'] = length
+                        # attempt to read first and last entries (best-effort)
+                        try:
+                            first = self.redis_db.xrange(key, min='-', max='+', count=1)
+                            if first:
+                                fid, ffields = first[0]
+                                info['first_id'] = fid
+                                raw = ffields.get(b'data') or ffields.get('data')
+                                if isinstance(raw, bytes):
+                                    raw = raw.decode()
+                                info['first_entry'] = raw
+                        except Exception:
+                            pass
+                        try:
+                            # prefer xrevrange if available to get last entry
+                            last = None
+                            if hasattr(self.redis_db, 'xrevrange'):
+                                lr = self.redis_db.xrevrange(key, max='+', min='-', count=1)
+                                if lr:
+                                    last = lr[0]
+                            else:
+                                # fallback: attempt to get last via xrange (not ideal for long streams)
+                                lr = self.redis_db.xrange(key, min='-', max='+')
+                                if lr:
+                                    last = lr[-1]
+                            if last:
+                                lid, lfields = last
+                                info['last_id'] = lid
+                                raw = lfields.get(b'data') or lfields.get('data')
+                                if isinstance(raw, bytes):
+                                    raw = raw.decode()
+                                info['last_entry'] = raw
+                        except Exception:
+                            pass
+
+                    results.append(info)
+                except Exception as e:
+                    print(f"Error inspecting key {key}: {e}")
+        except Exception as e:
+            print(f"Error scanning keys with pattern {pattern}: {e}")
+
+        # # pretty-print
+        # for r in results:
+        #     print(r)
+
+        return results
+
+    def delete(self, stream_name):
+        """
+        Delete a specific Redis stream key.
+
+        Args:
+            stream_name (str): The name of the stream to delete.
+
+        Returns:
+            bool: True if the key was deleted, False if it did not exist or on error.
+        """
+        try:
+            res = self.redis_db.delete(stream_name)
+            # redis.delete returns number of keys removed (0 or 1)
+            return bool(res)
+        except Exception as e:
+            print(f"Error deleting stream {stream_name}: {e}")
+            return False
+
+    def trim(self, stream_name, timestamp):
+        """
+        Trim a stream by removing entries older than `timestamp` while keeping the
+        stream key itself. This is a stub: expected behavior is to remove entries
+        whose embedded `timestamp` field (or entry id if appropriate) is older
+        than the provided timestamp. `timestamp` may be an ISO-8601 string or a
+        datetime.
+
+        Args:
+            stream_name (str): Name of the Redis stream.
+            timestamp (str|datetime): Cutoff; entries older than this should be removed.
+
+        Returns:
+            int|None: Number of removed entries or None if unimplemented/error.
+        """
+        # Normalize timestamp to datetime
+        if isinstance(timestamp, str):
+            dt = string_to_datetime(timestamp)
+        elif isinstance(timestamp, datetime):
+            dt = timestamp
+        else:
+            raise TypeError("timestamp must be an ISO string or datetime")
+
+        if dt is None:
+            print("Invalid timestamp provided")
+            return None
+
+        # Ensure UTC milliseconds
+        try:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=pytz.UTC)
+            else:
+                dt = dt.astimezone(pytz.UTC)
+        except Exception:
+            # best-effort
+            pass
+
+        cutoff_ms = int(dt.timestamp() * 1000)
+        minid = f"{cutoff_ms}-0"
+
+        # Preferred fast path: use XTRIM MINID (server-side, single command)
+        try:
+            # XTRIM <key> MINID <minid>
+            res = self.redis_db.execute_command("XTRIM", stream_name, "MINID", minid)
+            # returns number of entries removed
             try:
-                self.redis_db.delete(key)
-            except Exception as e:
-                print(f"Error deleting key={key}: {e}")
+                return int(res)
+            except Exception:
+                return res
+        except Exception as e:
+            # MINID may not be supported by server/driver; fallback to client-side batch delete
+            print(f"XTRIM MINID not supported or failed: {e}; falling back to XRANGE+XDEL")
+
+        # Fallback: XRANGE entries up to minid, then XDEL those entry IDs in one batch
+        try:
+            entries = self.redis_db.xrange(stream_name, min='-', max=minid)
+            ids = [eid for eid, _ in entries]
+            if not ids:
+                return 0
+            deleted = self.redis_db.xdel(stream_name, *ids)
+            try:
+                return int(deleted)
+            except Exception:
+                return deleted
+        except Exception as e:
+            print(f"Fallback trim failed: {e}")
+            return None
 
 class TimeBasedMovement:
 

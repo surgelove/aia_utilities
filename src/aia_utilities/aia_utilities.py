@@ -7,6 +7,9 @@ import subprocess
 import threading
 import pandas as pd
 import pytz
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("America/New_York")
 
 class Redis_Utilities:
     """
@@ -59,7 +62,6 @@ class Redis_Utilities:
             return items
 
         for entry_id, fields in entries:
-            # fields can be {b'data': b'...'} or {'data': '...'} depending on client
             raw = fields.get(b'data') or fields.get('data')
             if raw is None:
                 continue
@@ -70,8 +72,6 @@ class Redis_Utilities:
             except json.JSONDecodeError as e:
                 print(f"JSON decode error for stream entry {entry_id}: {e}")
                 continue
-            # attach id in case caller wants it
-            data.setdefault('_id', entry_id)
             items.append(data)
 
         if order:
@@ -142,88 +142,34 @@ class Redis_Utilities:
         except Exception as e:
             print(f"Error writing to stream {prefix}: {e}")
 
+    def show(self, stream, sample=5):
+        return_dict = self.read_all(stream, order=False)
 
-    def show(self, prefix=None):
-        """
-        Inspect Redis and print keys and stream information.
+        # tell me if the return_dict is ordered by timestamp or not
+        if return_dict:
+            is_ordered = all(return_dict[i]["timestamp"] <= return_dict[i + 1]["timestamp"] for i in range(len(return_dict) - 1))
+            if is_ordered:
+                print("The items are ordered by timestamp.")
+            else:
+                print("The items are NOT ordered by timestamp.")
+        else:
+            print("The stream is empty.")
+        
+        print(f'{len(return_dict)} items, type {type(return_dict)}')
 
-        Args:
-            prefix (str|None): Optional prefix to filter keys (pattern prefix*). If None lists all keys.
+        if len(return_dict) < sample * 2:
+            sample_previous = sample
+            sample = max(1, len(return_dict) // 2)
+            print(f"Adjusted sample from {sample_previous} to {sample} because stream is {len(return_dict)} items.")
 
-        Returns:
-            list: List of dicts with key metadata (key, type, ttl, stream length, sample entries).
-        """
-        pattern = f"{prefix}*" if prefix else "*"
-        results = []
-        try:
-            for key in self.redis_db.scan_iter(pattern):
-                try:
-                    key_str = key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
-                    t = self.redis_db.type(key)
-                    if isinstance(t, bytes):
-                        t = t.decode()
-                    ttl = None
-                    try:
-                        ttl = self.redis_db.ttl(key)
-                    except Exception:
-                        pass
+        # print the first 5 items in the return_dict and the last 5 items
+        print(f"First {sample}:")
+        for item in return_dict[:sample]:
+            print(item)
+        print(f"Last {sample}:")
+        for item in return_dict[-sample:]:
+            print(item)
 
-                    info = {"key": key_str, "type": t, "ttl": ttl}
-
-                    if t == 'stream':
-                        # stream metadata
-                        try:
-                            length = self.redis_db.xlen(key)
-                        except Exception:
-                            length = None
-                        info['length'] = length
-                        # also expose 'items' as a semantic alias for number of entries
-                        info['items'] = length
-                        # attempt to read first and last entries (best-effort)
-                        try:
-                            first = self.redis_db.xrange(key, min='-', max='+', count=1)
-                            if first:
-                                fid, ffields = first[0]
-                                info['first_id'] = fid
-                                raw = ffields.get(b'data') or ffields.get('data')
-                                if isinstance(raw, bytes):
-                                    raw = raw.decode()
-                                info['first_entry'] = raw
-                        except Exception:
-                            pass
-                        try:
-                            # prefer xrevrange if available to get last entry
-                            last = None
-                            if hasattr(self.redis_db, 'xrevrange'):
-                                lr = self.redis_db.xrevrange(key, max='+', min='-', count=1)
-                                if lr:
-                                    last = lr[0]
-                            else:
-                                # fallback: attempt to get last via xrange (not ideal for long streams)
-                                lr = self.redis_db.xrange(key, min='-', max='+')
-                                if lr:
-                                    last = lr[-1]
-                            if last:
-                                lid, lfields = last
-                                info['last_id'] = lid
-                                raw = lfields.get(b'data') or lfields.get('data')
-                                if isinstance(raw, bytes):
-                                    raw = raw.decode()
-                                info['last_entry'] = raw
-                        except Exception:
-                            pass
-
-                    results.append(info)
-                except Exception as e:
-                    print(f"Error inspecting key {key}: {e}")
-        except Exception as e:
-            print(f"Error scanning keys with pattern {pattern}: {e}")
-
-        # # pretty-print
-        # for r in results:
-        #     print(r)
-
-        return results
 
     def delete(self, stream_name):
         """
@@ -243,73 +189,6 @@ class Redis_Utilities:
             print(f"Error deleting stream {stream_name}: {e}")
             return False
 
-    def trim(self, stream_name, timestamp):
-        """
-        Trim a stream by removing entries older than `timestamp` while keeping the
-        stream key itself. This is a stub: expected behavior is to remove entries
-        whose embedded `timestamp` field (or entry id if appropriate) is older
-        than the provided timestamp. `timestamp` may be an ISO-8601 string or a
-        datetime.
-
-        Args:
-            stream_name (str): Name of the Redis stream.
-            timestamp (str|datetime): Cutoff; entries older than this should be removed.
-
-        Returns:
-            int|None: Number of removed entries or None if unimplemented/error.
-        """
-        # Normalize timestamp to datetime
-        if isinstance(timestamp, str):
-            dt = string_to_datetime(timestamp)
-        elif isinstance(timestamp, datetime):
-            dt = timestamp
-        else:
-            raise TypeError("timestamp must be an ISO string or datetime")
-
-        if dt is None:
-            print("Invalid timestamp provided")
-            return None
-
-        # Ensure UTC milliseconds
-        try:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=pytz.UTC)
-            else:
-                dt = dt.astimezone(pytz.UTC)
-        except Exception:
-            # best-effort
-            pass
-
-        cutoff_ms = int(dt.timestamp() * 1000)
-        minid = f"{cutoff_ms}-0"
-
-        # Preferred fast path: use XTRIM MINID (server-side, single command)
-        try:
-            # XTRIM <key> MINID <minid>
-            res = self.redis_db.execute_command("XTRIM", stream_name, "MINID", minid)
-            # returns number of entries removed
-            try:
-                return int(res)
-            except Exception:
-                return res
-        except Exception as e:
-            # MINID may not be supported by server/driver; fallback to client-side batch delete
-            print(f"XTRIM MINID not supported or failed: {e}; falling back to XRANGE+XDEL")
-
-        # Fallback: XRANGE entries up to minid, then XDEL those entry IDs in one batch
-        try:
-            entries = self.redis_db.xrange(stream_name, min='-', max=minid)
-            ids = [eid for eid, _ in entries]
-            if not ids:
-                return 0
-            deleted = self.redis_db.xdel(stream_name, *ids)
-            try:
-                return int(deleted)
-            except Exception:
-                return deleted
-        except Exception as e:
-            print(f"Fallback trim failed: {e}")
-            return None
 
 class TimeBasedMovement:
 
@@ -364,37 +243,62 @@ class TimeBasedMovement:
             
         return ((end_price - start_price) / start_price) * 100
     
-def string_to_datetime(date_string):
-    """
-    Convert a string to a datetime object.
 
-    Args:
-        date_string (str): The date string to convert.
+class Time_Management:
+    def __init__(self):
+        pass
 
-    Returns:
-        datetime: The converted datetime object or None on error.
-    """
-    try:
-        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-    except Exception as e:
-        print(f"Error converting string to datetime: {e}")
-        return None
+    def datetime_to_string(self, timestamp):
+        timestamp_with_microseconds = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+        return timestamp_with_microseconds
+    
+    def convert_utc_to_ny(utc_time_str):
+        """Convert an ISO-8601 UTC timestamp (optionally ending with 'Z')
+        into a naive datetime string in the America/New_York timezone.
 
-def datetime_to_string(dt):
-    """
-    Convert a datetime object to an ISO-8601 string.
+        Returns a string formatted as YYYY-MM-DD HH:MM:SS or None on error.
+        """
+        try:
+            return (datetime.fromisoformat(utc_time_str.replace('Z', '+00:00'))
+                    .astimezone(pytz.timezone('America/New_York'))
+                    .replace(tzinfo=None, microsecond=0)
+                    .strftime('%Y-%m-%d %H:%M:%S'))
+        except Exception as e:
+            print(f"Error converting time: {e}")
+            return None
+        
+    # def datetime_to_string(dt):
+    #     """
+    #     Convert a datetime object to an ISO-8601 string.
 
-    Args:
-        dt (datetime): The datetime object to convert.
+    #     Args:
+    #         dt (datetime): The datetime object to convert.
 
-    Returns:
-        str: The converted ISO-8601 string or None on error.
-    """
-    try:
-        return dt.isoformat()
-    except Exception as e:
-        print(f"Error converting datetime to string: {e}")
-        return None
+    #     Returns:
+    #         str: The converted ISO-8601 string or None on error.
+    #     """
+    #     try:
+    #         return dt.isoformat()
+    #     except Exception as e:
+    #         print(f"Error converting datetime to string: {e}")
+    #         return None
+        
+    def string_to_datetime(date_string):
+        """
+        Convert a string to a datetime object.
+
+        Args:
+            date_string (str): The date string to convert.
+
+        Returns:
+            datetime: The converted datetime object or None on error.
+        """
+        try:
+            return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+        except Exception as e:
+            print(f"Error converting string to datetime: {e}")
+            return None
+
     
 
 def say_nonblocking(text, voice=None, volume=2):
@@ -434,20 +338,7 @@ def say_nonblocking(text, voice=None, volume=2):
     thread.start()
 
 
-def convert_utc_to_ny(utc_time_str):
-    """Convert an ISO-8601 UTC timestamp (optionally ending with 'Z')
-    into a naive datetime string in the America/New_York timezone.
 
-    Returns a string formatted as YYYY-MM-DD HH:MM:SS or None on error.
-    """
-    try:
-        return (datetime.fromisoformat(utc_time_str.replace('Z', '+00:00'))
-                .astimezone(pytz.timezone('America/New_York'))
-                .replace(tzinfo=None, microsecond=0)
-                .strftime('%Y-%m-%d %H:%M:%S'))
-    except Exception as e:
-        print(f"Error converting time: {e}")
-        return None
 
 def updown(direction):
     """Return a human-friendly direction label for a numeric delta.
@@ -459,7 +350,4 @@ def updown(direction):
         str or None: 'up', 'down', or None for no movement.
     """
     return "up" if direction > 0 else "down" if direction < 0 else None
-
-
-
 

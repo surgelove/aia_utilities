@@ -35,6 +35,17 @@ class Redis_Utilities:
         # stream_maxlen controls approximate trimming when writing.
         self.stream_maxlen = stream_maxlen
 
+    def start(self):
+        """
+        Start the Redis utility, including any necessary background tasks.
+        """
+        # Auto-start Redis if not running (dev only; assumes redis-server in PATH)
+        try:
+            subprocess.run(['redis-server', '--daemonize', 'yes'], check=True)
+            print("✅ Redis started")
+        except subprocess.CalledProcessError:
+            print("⚠️ Redis may already be running or not installed")
+
     def read_all(self, prefix, order=True):
         """
         Read all Redis entries matching the given prefix, returning them as a sorted list of dicts.

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/New_York")
 
-class Redis_Utilities:
+class RedisUtilities:
     """
     Utility class for interacting with Redis, including reading and writing JSON entries.
     """
@@ -199,6 +199,32 @@ class Redis_Utilities:
             print(f"Error deleting stream {stream_name}: {e}")
             return False
 
+    def clear(self, stream_name, key):
+        # remove entries with the given key from the stream
+        try:
+            entries = self.redis_db.xrange(stream_name, min='-', max='+')
+            print(entries)
+            print(len(entries), "entries found in stream", stream_name)
+            for entry_id, fields in entries:
+                # decode id bytes -> str
+                if isinstance(entry_id, bytes):
+                    entry_id = entry_id.decode()
+
+                # get the data field (may be bytes)
+                raw = fields.get(b'data') or fields.get('data')
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+
+                # parse json and read timestamp
+                data = json.loads(raw)
+                instrument = data.get('instrument')
+
+                if instrument == key:
+                    self.redis_db.xdel(stream_name, entry_id)
+                    # print(f"Deleted entry {entry_id} from stream {stream_name}")
+ 
+        except Exception as e:
+            print(f"Error clearing entries from stream {stream_name}: {e}")
 
 class TimeBasedMovement:
 

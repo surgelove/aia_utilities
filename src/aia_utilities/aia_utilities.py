@@ -181,7 +181,6 @@ class Redis_Utilities:
         for item in return_dict[-sample:]:
             print(item)
 
-
     def delete(self, stream_name):
         """
         Delete a specific Redis stream key.
@@ -255,7 +254,8 @@ class TimeBasedMovement:
         return ((end_price - start_price) / start_price) * 100
     
 
-class Time_Management:
+class TimeManagement:
+
     def __init__(self):
         pass
 
@@ -263,7 +263,7 @@ class Time_Management:
         timestamp_with_microseconds = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
         return timestamp_with_microseconds
     
-    def convert_utc_to_ny(utc_time_str):
+    def convert_utc_to_ny(self, utc_time_str):
         """Convert an ISO-8601 UTC timestamp (optionally ending with 'Z')
         into a naive datetime string in the America/New_York timezone.
 
@@ -294,7 +294,7 @@ class Time_Management:
     #         print(f"Error converting datetime to string: {e}")
     #         return None
         
-    def string_to_datetime(date_string):
+    def string_to_datetime(self, date_string):
         """
         Convert a string to a datetime object.
 
@@ -311,54 +311,52 @@ class Time_Management:
             return None
 
     
+class Helpers:
 
-def say_nonblocking(text, voice=None, volume=2):
-    """Speak `text` using the macOS `say` command without blocking.
+    def say_nonblocking(self, text, voice=None, volume=2):
+        """Speak `text` using the macOS `say` command without blocking.
 
-    The speaking is performed in a daemon thread so the caller can
-    continue execution immediately. Volume is set with `osascript`.
+        The speaking is performed in a daemon thread so the caller can
+        continue execution immediately. Volume is set with `osascript`.
 
-    Args:
-        text (str): The text to speak.
-        voice (str, optional): Voice name to pass to `say`.
-        volume (int, optional): Volume level (0-100). Default 2 here
-            matches the historical value in the repo; users can change it.
-    """
-    print("Speaking:", text)
-    def speak():
-        try:
-            # Set system volume before speaking
-            # This requires 'osascript' which is available on macOS
-            volume_cmd = ['osascript', '-e', f'set volume output volume {volume}']
-            subprocess.run(volume_cmd, check=True)
-            
-            # Now speak the text
-            cmd = ['say']
-            if voice:
-                cmd.extend(['-v', voice])
-            cmd.append(text)
-            subprocess.run(cmd, check=True)
-            
-            # Optional: Reset volume to a default level when done
-            # subprocess.run(['osascript', '-e', 'set volume output volume 75'], check=True)
-        except Exception as e:
-            print(f"Error with text-to-speech: {e}")
-    
-    # Run in a separate thread to avoid blocking
-    thread = threading.Thread(target=speak, daemon=True)
-    thread.start()
+        Args:
+            text (str): The text to speak.
+            voice (str, optional): Voice name to pass to `say`.
+            volume (int, optional): Volume level (0-100). Default 2 here
+                matches the historical value in the repo; users can change it.
+        """
+        print("Speaking:", text)
+        def speak():
+            try:
+                # Set system volume before speaking
+                # This requires 'osascript' which is available on macOS
+                volume_cmd = ['osascript', '-e', f'set volume output volume {volume}']
+                subprocess.run(volume_cmd, check=True)
+                
+                # Now speak the text
+                cmd = ['say']
+                if voice:
+                    cmd.extend(['-v', voice])
+                cmd.append(text)
+                subprocess.run(cmd, check=True)
+                
+                # Optional: Reset volume to a default level when done
+                # subprocess.run(['osascript', '-e', 'set volume output volume 75'], check=True)
+            except Exception as e:
+                print(f"Error with text-to-speech: {e}")
+        
+        # Run in a separate thread to avoid blocking
+        thread = threading.Thread(target=speak, daemon=True)
+        thread.start()
 
+    def updown(self, direction):
+        """Return a human-friendly direction label for a numeric delta.
 
+        Args:
+            direction (float): Positive for up, negative for down, zero for neutral.
 
-
-def updown(direction):
-    """Return a human-friendly direction label for a numeric delta.
-
-    Args:
-        direction (float): Positive for up, negative for down, zero for neutral.
-
-    Returns:
-        str or None: 'up', 'down', or None for no movement.
-    """
-    return "up" if direction > 0 else "down" if direction < 0 else None
+        Returns:
+            str or None: 'up', 'down', or None for no movement.
+        """
+        return "up" if direction > 0 else "down" if direction < 0 else None
 

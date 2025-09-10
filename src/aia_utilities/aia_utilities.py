@@ -16,7 +16,7 @@ class RedisUtilities:
     Utility class for interacting with Redis, including reading and writing JSON entries.
     """
 
-    def __init__(self, host='localhost', port=6379, db=0, ttl=120, stream_maxlen=10000):
+    def __init__(self, host='localhost', port=6379, db=0, ttl=120):
         """
         Initialize the Redis_Utilities instance.
 
@@ -33,7 +33,6 @@ class RedisUtilities:
         self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
         # This utility uses Redis Streams (XADD/XREAD/XRANGE) exclusively.
         # stream_maxlen controls approximate trimming when writing.
-        self.stream_maxlen = stream_maxlen
 
     def start(self):
         """
@@ -46,12 +45,12 @@ class RedisUtilities:
         except subprocess.CalledProcessError:
             print("⚠️ Redis may already be running or not installed")
 
-    def read_all(self, prefix, order=True):
+    def read_all(self, stream, order=True):
         """
-        Read all Redis entries matching the given prefix, returning them as a sorted list of dicts.
+        Read all Redis entries matching the given stream, returning them as a sorted list of dicts.
 
         Args:
-            prefix (str): Key prefix to scan for.
+            stream (str): Stream name to read from.
             order (bool): If True, sort results by 'timestamp'.
 
         Returns:
@@ -59,7 +58,7 @@ class RedisUtilities:
         """
 
         """
-        Read all entries from the Redis Stream named `prefix` using XRANGE.
+        Read all entries from the Redis Stream named `stream` using XRANGE.
 
         Returns a list of dicts parsed from the stream 'data' field. If
         `order` is True and a 'timestamp' field exists it will sort by it
@@ -67,9 +66,9 @@ class RedisUtilities:
         """
         items = []
         try:
-            entries = self.redis_db.xrange(prefix, min='-', max='+')
+            entries = self.redis_db.xrange(stream, min='-', max='+')
         except Exception as e:
-            print(f"Error reading stream {prefix}: {e}")
+            print(f"Error reading stream {stream}: {e}")
             return items
 
         for entry_id, fields in entries:
@@ -93,19 +92,19 @@ class RedisUtilities:
 
         return items
 
-    def read_each(self, prefix):
+    def read_each(self, stream):
         """
-        Continuously yield new Redis entries matching the given prefix as dicts.
-        Prefix should be <prefix>:<instrument>
+        Continuously yield new Redis entries matching the given stream as dicts.
+        Stream should be <stream>:<instrument>
 
         Args:
-            prefix (str): Key prefix to scan for.
+            stream (str): Stream name to read from.
 
         Yields:
             dict: Newly found Redis entry as a dict.
         """
         """
-        Continuously yield new entries from the Redis Stream named `prefix`.
+        Continuously yield new entries from the Redis Stream named `stream`.
 
         This uses XREAD to block for new entries. It starts at '0-0' which
         will emit existing entries first; if you want only new entries use
@@ -116,7 +115,7 @@ class RedisUtilities:
         while True:
             try:
                 # block for up to 1000ms waiting for new entries
-                resp = self.redis_db.xread({prefix: last_id}, block=1000)
+                resp = self.redis_db.xread({stream: last_id}, block=1000)
                 if not resp:
                     continue
                 for stream_key, entries in resp:
@@ -134,24 +133,24 @@ class RedisUtilities:
                         last_id = entry_id
                         yield data
             except Exception as e:
-                print(f"Error reading stream {prefix}: {e}")
+                print(f"Error reading stream {stream}: {e}")
                 time.sleep(0.5)
 
-    def write(self, prefix, value):
+    def write(self, stream, value, maxlen):
         """
-        Write a dict value to Redis with a generated key using the given prefix.
-        Prefix should be <prefix>:<instrument>
+        Write a dict value to Redis with a generated key using the given stream.
+        Stream should be <stream>:<instrument>
 
         Args:
-            prefix (str): Key prefix for the entry.
+            stream (str): Stream name for the entry.
             value (dict): Value to store as JSON.
         """
         assert isinstance(value, dict)
         try:
             # store JSON in the 'data' field; approximate trimming to keep stream size bounded
-            self.redis_db.xadd(prefix, {'data': json.dumps(value)}, maxlen=self.stream_maxlen, approximate=True)
+            self.redis_db.xadd(stream, {'data': json.dumps(value)}, maxlen=maxlen, approximate=True)
         except Exception as e:
-            print(f"Error writing to stream {prefix}: {e}")
+            print(f"Error writing to stream {stream}: {e}")
 
     def show(self, stream, sample=5):
         return_dict = self.read_all(stream, order=False)
@@ -181,30 +180,28 @@ class RedisUtilities:
         for item in return_dict[-sample:]:
             print(item)
 
-    def delete(self, stream_name):
+    def delete(self, stream):
         """
         Delete a specific Redis stream key.
 
         Args:
-            stream_name (str): The name of the stream to delete.
+            stream (str): The name of the stream to delete.
 
         Returns:
             bool: True if the key was deleted, False if it did not exist or on error.
         """
         try:
-            res = self.redis_db.delete(stream_name)
+            res = self.redis_db.delete(stream)
             # redis.delete returns number of keys removed (0 or 1)
             return bool(res)
         except Exception as e:
-            print(f"Error deleting stream {stream_name}: {e}")
+            print(f"Error deleting stream {stream}: {e}")
             return False
 
-    def clear(self, stream_name, key):
+    def clear(self, stream, field, key):
         # remove entries with the given key from the stream
         try:
-            entries = self.redis_db.xrange(stream_name, min='-', max='+')
-            print(entries)
-            print(len(entries), "entries found in stream", stream_name)
+            entries = self.redis_db.xrange(stream, min='-', max='+')
             for entry_id, fields in entries:
                 # decode id bytes -> str
                 if isinstance(entry_id, bytes):
@@ -217,14 +214,36 @@ class RedisUtilities:
 
                 # parse json and read timestamp
                 data = json.loads(raw)
-                instrument = data.get('instrument')
+                f = data.get(field)
 
-                if instrument == key:
-                    self.redis_db.xdel(stream_name, entry_id)
-                    # print(f"Deleted entry {entry_id} from stream {stream_name}")
- 
+                if f == key:
+                    self.redis_db.xdel(stream, entry_id)
+
         except Exception as e:
-            print(f"Error clearing entries from stream {stream_name}: {e}")
+            print(f"Error clearing entries from stream {stream}: {e}")
+
+    def get_latest(self, stream, field, key):
+        try:
+            # Get all entries in reverse order (newest first)
+            entries = self.redis_db.xrevrange(stream, min='-', max='+')
+            
+            for entry_id, fields in entries:
+                # get the data field (may be bytes)
+                raw = fields.get(b'data') or fields.get('data')
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+
+                # parse json and check field
+                data = json.loads(raw)
+                f = data.get(field)
+
+                if f == key:
+                    return data
+
+        except Exception as e:
+            print(f"Error getting latest entry from stream {stream}: {e}")
+        return None
+
 
 class TimeBasedMovement:
 

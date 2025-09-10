@@ -11,7 +11,7 @@ __all__ = [
     "TimeBasedMovement",
     "updown",
 ]
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 
 from .aia_utilities import (
     RedisUtilities,

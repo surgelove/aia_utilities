@@ -16,7 +16,7 @@ class RedisUtilities:
     Utility class for interacting with Redis, including reading and writing JSON entries.
     """
 
-    def __init__(self, host='localhost', port=6379, db=0, ttl=120):
+    def __init__(self, host='localhost', port=6379, db=0):
         """
         Initialize the Redis_Utilities instance.
 
@@ -24,12 +24,10 @@ class RedisUtilities:
             host (str): Redis server host.
             port (int): Redis server port.
             db (int): Redis database number.
-            ttl (int): Time-to-live for written keys in seconds.
         """
         self.host = host
         self.port = port
         self.db = db
-        self.ttl = ttl
         self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
         # This utility uses Redis Streams (XADD/XREAD/XRANGE) exclusively.
         # stream_maxlen controls approximate trimming when writing.

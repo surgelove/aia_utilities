@@ -321,21 +321,56 @@ class TimeManagement:
             print(f"Error converting time: {e}")
             return None
         
-    # def datetime_to_string(dt):
-    #     """
-    #     Convert a datetime object to an ISO-8601 string.
-
-    #     Args:
-    #         dt (datetime): The datetime object to convert.
-
-    #     Returns:
-    #         str: The converted ISO-8601 string or None on error.
-    #     """
-    #     try:
-    #         return dt.isoformat()
-    #     except Exception as e:
-    #         print(f"Error converting datetime to string: {e}")
-    #         return None
+    def utc_to_ny(utc_date_string, with_microseconds=True):
+        """
+        Convert a UTC date string to New York time.
+        
+        Args:
+            utc_date_string: UTC date string in formats like:
+                            - "2025-01-15T23:00:00Z"
+                            - "2025-01-15 23:00:00"
+                            - "2025-07-15T22:00:00Z"
+                            - "2025-10-19 22:00:57.778102"
+        
+        Returns:
+            datetime string in format: "YYYY-MM-DD HH:MM:SS.ffffff"
+        """
+        # Define timezones
+        utc = pytz.UTC
+        ny_tz = pytz.timezone('America/New_York')
+        
+        # Parse the UTC string (handle both formats with/without 'Z')
+        utc_date_string = utc_date_string.replace('Z', '')
+        
+        # Try different datetime formats (order matters - most specific first)
+        formats = [
+            "%Y-%m-%d %H:%M:%S.%f",      # 2025-10-19 22:00:57.778102
+            "%Y-%m-%dT%H:%M:%S.%f",      # 2025-01-15T23:00:00.123456
+            "%Y-%m-%d %H:%M:%S",         # 2025-01-15 23:00:00
+            "%Y-%m-%dT%H:%M:%S",         # 2025-01-15T23:00:00
+        ]
+        
+        dt_utc = None
+        for fmt in formats:
+            try:
+                dt_utc = datetime.strptime(utc_date_string, fmt)
+                break
+            except ValueError:
+                continue
+        
+        if dt_utc is None:
+            raise ValueError(f"Unable to parse date string: {utc_date_string}")
+        
+        # Make it timezone-aware (UTC)
+        dt_utc = utc.localize(dt_utc)
+        
+        # Convert to New York time
+        dt_ny = dt_utc.astimezone(ny_tz)
+        
+        # Return formatted string with microseconds, without timezone
+        if not with_microseconds:
+            return dt_ny.strftime('%Y-%m-%d %H:%M:%S')
+        return dt_ny.strftime('%Y-%m-%d %H:%M:%S.%f')   
         
     def string_to_datetime(self, date_string):
         """
@@ -351,7 +386,7 @@ class TimeManagement:
             return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
         except Exception as e:
             print(f"Error converting string to datetime: {e}")
-            return None
+            return None 
 
     
 class Helpers:
@@ -403,3 +438,16 @@ class Helpers:
         """
         return "up" if direction > 0 else "down" if direction < 0 else None
 
+
+class Data:
+    
+    def __init__(self):
+        pass
+
+    def df_from_dicts(self, data):
+        ...
+
+class Broker:
+
+    def __init__(self):
+        pass

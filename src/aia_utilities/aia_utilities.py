@@ -372,6 +372,60 @@ class TimeManagement:
             return dt_ny.strftime('%Y-%m-%d %H:%M:%S')
         return dt_ny.strftime('%Y-%m-%d %H:%M:%S.%f')   
         
+
+    def get_ny_utc_offset(date_string):
+        """
+        Get the UTC offset for New York timezone at a given date.
+        
+        Args:
+            date_string: Date string in various formats like:
+                        - "2025-01-15 23:00:00"
+                        - "2025-07-15T22:00:00"
+                        - "2025-10-19 22:00:57.778102"
+        
+        Returns:
+            int: Offset in hours (e.g., -5 for EST, -4 for EDT)
+        """
+        from datetime import datetime
+        import pytz
+        
+        # Define timezones
+        utc = pytz.UTC
+        ny_tz = pytz.timezone('America/New_York')
+        
+        # Parse the date string (handle various formats)
+        date_string = date_string.replace('Z', '')
+        
+        formats = [
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ]
+        
+        dt_utc = None
+        for fmt in formats:
+            try:
+                dt_utc = datetime.strptime(date_string, fmt)
+                break
+            except ValueError:
+                continue
+        
+        if dt_utc is None:
+            raise ValueError(f"Unable to parse date string: {date_string}")
+        
+        # Make it timezone-aware (UTC)
+        dt_utc = utc.localize(dt_utc)
+        
+        # Convert to New York time
+        dt_ny = dt_utc.astimezone(ny_tz)
+        
+        # Get offset in hours
+        offset_seconds = dt_ny.utcoffset().total_seconds()
+        offset_hours = int(offset_seconds / 3600)
+        
+        return offset_hours
+
     def string_to_datetime(self, date_string):
         """
         Convert a string to a datetime object.

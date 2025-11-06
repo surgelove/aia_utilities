@@ -5,15 +5,15 @@ __init__py
 setup.cfg
 
 git add setup.cfg src/aia_utilities/__init__.py
-git commit -m "Bump version to 0.1.16"
-git tag v0.1.16
+git commit -m "Bump version to 0.1.17"
+git tag v0.1.17
 git push && git push --tags
 
 python3 -m pip install --upgrade build twine
 python3 -m build
 
 ls -la dist   
-rm dist/*0.1.15*
+rm dist/*0.1.16*
 
 the password is in shared folder
 PyPI-Recovery-Codes-SurgeLove-2025-08-27T12_54_38.218571.txt

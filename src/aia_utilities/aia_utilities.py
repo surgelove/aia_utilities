@@ -242,61 +242,6 @@ class RedisUtilities:
             print(f"Error getting latest entry from stream {stream}: {e}")
         return None
 
-
-class TimeBasedMovement:
-
-    def __init__(self, range):
-        """Create a TimeBasedMovement tracker.
-
-        Args:
-            range (int): Window in minutes to calculate movement over.
-        """
-        # Holds dicts: {'timestamp': <pd.Timestamp>, 'price': <float>}
-        self.data = []
-        self.range = range
-        # Keep a reasonable maximum to avoid unbounded memory growth
-        self.max_size = 500
-
-    def add(self, timestamp, price):
-        self.data.append(
-            {
-                "timestamp": timestamp,
-                "price": price,
-            }
-        )
-        
-        # Remove oldest data if queue exceeds max size
-        if len(self.data) > self.max_size:
-            self.data.pop(0)
-
-    def clear(self):
-        """Reset the stored price history to empty."""
-        # Simple reset to drop all stored points
-        self.data = []
-
-    def calc(self):
-        # Calculate the movement of the price for the last 5 minutes
-        if len(self.data) < 2:
-            return 0.0
-
-        # Get the price data for the last n minutes
-        range_ago = self.data[-1]["timestamp"] - pd.Timedelta(minutes=self.range)
-        relevant_data = [d for d in self.data if d["timestamp"] > range_ago]
-
-        if not relevant_data:
-            return 0.0
-
-        # Calculate the price movement percentage
-        start_price = relevant_data[0]["price"]
-        end_price = relevant_data[-1]["price"]
-        
-        # Avoid division by zero
-        if start_price == 0:
-            return 0.0
-            
-        return ((end_price - start_price) / start_price) * 100
-    
-
 class TimeManagement:
 
     def __init__(self):
@@ -320,8 +265,8 @@ class TimeManagement:
         except Exception as e:
             print(f"Error converting time: {e}")
             return None
-        
-    def utc_to_ny(utc_date_string, with_microseconds=True):
+
+    def utc_to_ny(self, utc_date_string, with_microseconds=True):
         """
         Convert a UTC date string to New York time.
         
@@ -373,7 +318,7 @@ class TimeManagement:
         return dt_ny.strftime('%Y-%m-%d %H:%M:%S.%f')   
         
 
-    def get_ny_utc_offset(date_string):
+    def get_ny_utc_offset(self, date_string):
         """
         Get the UTC offset for New York timezone at a given date.
         
@@ -442,7 +387,6 @@ class TimeManagement:
             print(f"Error converting string to datetime: {e}")
             return None 
 
-    
 class Helpers:
 
     def say_nonblocking(self, text, voice=None, volume=2):
@@ -491,7 +435,6 @@ class Helpers:
             str or None: 'up', 'down', or None for no movement.
         """
         return "up" if direction > 0 else "down" if direction < 0 else None
-
 
 class Data:
     

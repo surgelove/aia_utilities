@@ -1,3 +1,5 @@
 redis
 pandas
 pytz
+pytest
+pytest-cov

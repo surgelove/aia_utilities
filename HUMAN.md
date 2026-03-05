@@ -28,16 +28,16 @@ Environment
 ```bash
 
 # Navigate to your project directory
-cd /Users/code/source/aia_prices
+cd /Users/code/source/aia_utilities
 
 # Remove any existing virtual environment
 rm -rf venv
 
 # Create new virtual environment with latest Python
-python3 -m venv aia_prices
+python3 -m venv aia_utilities
 
 # Activate the virtual environment
-source aia_prices/bin/activate
+source aia_utilities/bin/activate
 
 # Verify you're in the virtual environment (should show (venv) in prompt)
 python --version

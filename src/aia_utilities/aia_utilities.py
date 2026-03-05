@@ -1,36 +1,67 @@
 import json
 import redis
 import time
-import uuid
 from datetime import datetime
 import subprocess
 import threading
+from typing import Any, Generator, Optional
 import pandas as pd
 import pytz
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/New_York")
 
+
 class RedisUtilities:
     """
-    Utility class for interacting with Redis, including reading and writing JSON entries.
+    Utility class for interacting with Redis Streams, with connection pooling
+    and optimized batch operations.
     """
 
-    def __init__(self, host='localhost', port=6379, db=0):
+    def __init__(self, host: str = 'localhost', port: int = 6379, db: int = 0,
+                 max_connections: int = 10, decode_responses: bool = False):
         """
-        Initialize the Redis_Utilities instance.
+        Initialize the RedisUtilities instance with connection pooling.
 
         Args:
-            host (str): Redis server host.
-            port (int): Redis server port.
-            db (int): Redis database number.
+            host: Redis server host.
+            port: Redis server port.
+            db: Redis database number.
+            max_connections: Maximum connections in the pool.
+            decode_responses: Whether to decode bytes to strings automatically.
         """
         self.host = host
         self.port = port
         self.db = db
-        self.redis_db = redis.Redis(host=self.host, port=self.port, db=self.db)
-        # This utility uses Redis Streams (XADD/XREAD/XRANGE) exclusively.
-        # stream_maxlen controls approximate trimming when writing.
+        self._pool = redis.ConnectionPool(
+            host=host, port=port, db=db,
+            max_connections=max_connections,
+            decode_responses=decode_responses
+        )
+        self.redis_db = redis.Redis(connection_pool=self._pool)
+
+    def _parse_entry_data(self, fields: dict) -> Optional[dict]:
+        """Parse JSON data from a stream entry's fields.
+
+        Args:
+            fields: The field dict from a stream entry.
+
+        Returns:
+            Parsed dict or None if parsing fails.
+        """
+        raw = fields.get(b'data') or fields.get('data')
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    def _decode_entry_id(self, entry_id) -> str:
+        """Decode entry ID to string if bytes."""
+        return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
 
     def start(self):
         """
@@ -43,204 +74,270 @@ class RedisUtilities:
         except subprocess.CalledProcessError:
             print("⚠️ Redis may already be running or not installed")
 
-    def read_all(self, stream, order=True):
+    def read_all(self, stream: str, order: bool = True, count: Optional[int] = None) -> list[dict]:
         """
-        Read all Redis entries matching the given stream, returning them as a sorted list of dicts.
+        Read all entries from a Redis Stream, returning them as a list of dicts.
 
         Args:
-            stream (str): Stream name to read from.
-            order (bool): If True, sort results by 'timestamp'.
+            stream: Stream name to read from.
+            order: If True, sort results by 'timestamp'.
+            count: Optional limit on number of entries to read.
 
         Returns:
-            list: List of dicts sorted by 'timestamp'.
-        """
-
-        """
-        Read all entries from the Redis Stream named `stream` using XRANGE.
-
-        Returns a list of dicts parsed from the stream 'data' field. If
-        `order` is True and a 'timestamp' field exists it will sort by it
-        (XRANGE already returns entries in ID order).
+            List of dicts, optionally sorted by 'timestamp'.
         """
         items = []
         try:
-            entries = self.redis_db.xrange(stream, min='-', max='+')
+            entries = self.redis_db.xrange(stream, min='-', max='+', count=count)
         except Exception as e:
             print(f"Error reading stream {stream}: {e}")
             return items
 
-        for entry_id, fields in entries:
-            raw = fields.get(b'data') or fields.get('data')
-            if raw is None:
-                continue
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError as e:
-                print(f"JSON decode error for stream entry {entry_id}: {e}")
-                continue
-            items.append(data)
+        for _, fields in entries:
+            data = self._parse_entry_data(fields)
+            if data is not None:
+                items.append(data)
 
-        if order:
-            try:
-                items.sort(key=lambda x: x.get('timestamp', ''))
-            except Exception:
-                pass
+        if order and items:
+            items.sort(key=lambda x: x.get('timestamp', ''))
 
         return items
 
-    def read_each(self, stream):
+    def read_each(self, stream: str, start_id: str = '0-0',
+                   block_ms: int = 1000) -> Generator[dict, None, None]:
         """
-        Continuously yield new Redis entries matching the given stream as dicts.
-        Stream should be <stream>:<instrument>
+        Continuously yield new entries from a Redis Stream.
+
+        Uses XREAD to block for new entries. Starts at start_id which defaults
+        to '0-0' (all existing entries first). Use '$' for only new entries.
 
         Args:
-            stream (str): Stream name to read from.
+            stream: Stream name to read from.
+            start_id: Starting stream ID ('0-0' for all, '$' for new only).
+            block_ms: Milliseconds to block waiting for entries.
 
         Yields:
-            dict: Newly found Redis entry as a dict.
+            Newly found Redis entry as a dict.
         """
-        """
-        Continuously yield new entries from the Redis Stream named `stream`.
+        last_id = start_id
+        backoff = 0.5
+        max_backoff = 30.0
 
-        This uses XREAD to block for new entries. It starts at '0-0' which
-        will emit existing entries first; if you want only new entries use
-        'last_id="$"' when calling this function externally and adapt as
-        needed. Returned items are decoded JSON dicts.
-        """
-        last_id = '0-0'
         while True:
             try:
-                # block for up to 1000ms waiting for new entries
-                resp = self.redis_db.xread({stream: last_id}, block=1000)
+                resp = self.redis_db.xread({stream: last_id}, block=block_ms)
+                backoff = 0.5  # Reset backoff on success
+
                 if not resp:
                     continue
-                for stream_key, entries in resp:
+
+                for _, entries in resp:
                     for entry_id, fields in entries:
-                        raw = fields.get(b'data') or fields.get('data')
-                        if raw is None:
-                            continue
-                        if isinstance(raw, bytes):
-                            raw = raw.decode()
-                        try:
-                            data = json.loads(raw)
-                        except json.JSONDecodeError as e:
-                            print(f"JSON decode error for stream entry {entry_id}: {e}")
-                            continue
-                        last_id = entry_id
-                        yield data
+                        data = self._parse_entry_data(fields)
+                        if data is not None:
+                            last_id = entry_id
+                            yield data
+
             except Exception as e:
                 print(f"Error reading stream {stream}: {e}")
-                time.sleep(0.5)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
-    def write(self, stream, value, maxlen):
+    def write(self, stream: str, value: dict, maxlen: int) -> Optional[str]:
         """
-        Write a dict value to Redis with a generated key using the given stream.
-        Stream should be <stream>:<instrument>
+        Write a dict value to a Redis Stream.
 
         Args:
-            stream (str): Stream name for the entry.
-            value (dict): Value to store as JSON.
+            stream: Stream name for the entry.
+            value: Value to store as JSON.
+            maxlen: Approximate max stream length for trimming.
+
+        Returns:
+            The entry ID on success, None on error.
         """
-        assert isinstance(value, dict)
+        if not isinstance(value, dict):
+            raise TypeError("value must be a dict")
         try:
-            # store JSON in the 'data' field; approximate trimming to keep stream size bounded
-            self.redis_db.xadd(stream, {'data': json.dumps(value)}, maxlen=maxlen, approximate=True)
+            return self.redis_db.xadd(
+                stream, {'data': json.dumps(value)},
+                maxlen=maxlen, approximate=True
+            )
         except Exception as e:
             print(f"Error writing to stream {stream}: {e}")
+            return None
 
-    def show(self, stream, sample=5):
-        return_dict = self.read_all(stream, order=False)
+    def write_batch(self, stream: str, values: list[dict], maxlen: int = None) -> int:
+        """
+        Write multiple dict values to a Redis Stream using pipelining.
 
-        # tell me if the return_dict is ordered by timestamp or not
-        if return_dict:
-            is_ordered = all(return_dict[i]["timestamp"] <= return_dict[i + 1]["timestamp"] for i in range(len(return_dict) - 1))
-            if is_ordered:
-                print("The items are ordered by timestamp.")
-            else:
-                print("The items are NOT ordered by timestamp.")
-        else:
+        Args:
+            stream: Stream name for the entries.
+            values: List of dicts to store as JSON.
+            maxlen: Optional max stream length for trimming. None = no trimming.
+
+        Returns:
+            Number of successfully written entries.
+        """
+        if not values:
+            return 0
+
+        pipe = self.redis_db.pipeline()
+        for value in values:
+            if isinstance(value, dict):
+                if maxlen is not None:
+                    pipe.xadd(stream, {'data': json.dumps(value)},
+                              maxlen=maxlen, approximate=True)
+                else:
+                    pipe.xadd(stream, {'data': json.dumps(value)})
+
+        try:
+            results = pipe.execute()
+            return sum(1 for r in results if r is not None)
+        except Exception as e:
+            print(f"Error in batch write to stream {stream}: {e}")
+            return 0
+
+    def show(self, stream: str, sample: int = 5) -> None:
+        """
+        Display stream info and sample entries (first and last N).
+
+        Args:
+            stream: Stream name to inspect.
+            sample: Number of entries to show from start and end.
+        """
+        try:
+            length = self.redis_db.xlen(stream)
+        except Exception as e:
+            print(f"Error getting stream length: {e}")
+            return
+
+        if length == 0:
             print("The stream is empty.")
-        
-        print(f'{len(return_dict)} items, type {type(return_dict)}')
+            return
 
-        if len(return_dict) < sample * 2:
-            sample_previous = sample
-            sample = max(1, len(return_dict) // 2)
-            print(f"Adjusted sample from {sample_previous} to {sample} because stream is {len(return_dict)} items.")
+        print(f'{length} items in stream')
 
-        # print the first 5 items in the return_dict and the last 5 items
-        print(f"First {sample}:")
-        for item in return_dict[:sample]:
-            print(item)
-        print(f"Last {sample}:")
-        for item in return_dict[-sample:]:
-            print(item)
+        # Adjust sample size for small streams
+        effective_sample = min(sample, max(1, length // 2))
+        if effective_sample != sample:
+            print(f"Adjusted sample from {sample} to {effective_sample} (stream has {length} items)")
 
-    def delete(self, stream):
+        # Get first N entries efficiently
+        first_entries = self.redis_db.xrange(stream, min='-', max='+', count=effective_sample)
+        print(f"\nFirst {effective_sample}:")
+        for _, fields in first_entries:
+            data = self._parse_entry_data(fields)
+            if data:
+                print(data)
+
+        # Get last N entries efficiently (reverse order)
+        last_entries = self.redis_db.xrevrange(stream, min='-', max='+', count=effective_sample)
+        print(f"\nLast {effective_sample}:")
+        for _, fields in reversed(last_entries):
+            data = self._parse_entry_data(fields)
+            if data:
+                print(data)
+
+    def delete(self, stream: str) -> bool:
         """
         Delete a specific Redis stream key.
 
         Args:
-            stream (str): The name of the stream to delete.
+            stream: The name of the stream to delete.
 
         Returns:
-            bool: True if the key was deleted, False if it did not exist or on error.
+            True if the key was deleted, False if it did not exist or on error.
         """
         try:
-            res = self.redis_db.delete(stream)
-            # redis.delete returns number of keys removed (0 or 1)
-            return bool(res)
+            return bool(self.redis_db.delete(stream))
         except Exception as e:
             print(f"Error deleting stream {stream}: {e}")
             return False
 
-    def clear(self, stream, field, key):
-        # remove entries with the given key from the stream
+    def clear(self, stream: str, field: str, key: Any, batch_size: int = 1000) -> int:
+        """
+        Remove entries with a matching field value from the stream using pipelining.
+
+        Args:
+            stream: Stream name to clear from.
+            field: Field name to check in the JSON data.
+            key: Value to match for deletion.
+            batch_size: Number of deletions per pipeline batch.
+
+        Returns:
+            Number of entries deleted.
+        """
+        deleted = 0
         try:
             entries = self.redis_db.xrange(stream, min='-', max='+')
+            ids_to_delete = []
+
             for entry_id, fields in entries:
-                # decode id bytes -> str
-                if isinstance(entry_id, bytes):
-                    entry_id = entry_id.decode()
+                data = self._parse_entry_data(fields)
+                if data and data.get(field) == key:
+                    ids_to_delete.append(self._decode_entry_id(entry_id))
 
-                # get the data field (may be bytes)
-                raw = fields.get(b'data') or fields.get('data')
-                if isinstance(raw, bytes):
-                    raw = raw.decode()
-
-                # parse json and read timestamp
-                data = json.loads(raw)
-                f = data.get(field)
-
-                if f == key:
-                    self.redis_db.xdel(stream, entry_id)
+            # Batch delete using pipeline
+            for i in range(0, len(ids_to_delete), batch_size):
+                batch = ids_to_delete[i:i + batch_size]
+                pipe = self.redis_db.pipeline()
+                for eid in batch:
+                    pipe.xdel(stream, eid)
+                results = pipe.execute()
+                deleted += sum(results)
 
         except Exception as e:
             print(f"Error clearing entries from stream {stream}: {e}")
 
-    def get_latest(self, stream, field, key):
+        return deleted
+
+    def get_latest(self, stream: str, field: str, key: Any) -> Optional[dict]:
+        """
+        Get the most recent entry matching a field value.
+
+        Args:
+            stream: Stream name to search.
+            field: Field name to match.
+            key: Value to match.
+
+        Returns:
+            The matching dict or None if not found.
+        """
         try:
-            # Get all entries in reverse order (newest first)
             entries = self.redis_db.xrevrange(stream, min='-', max='+')
-            
-            for entry_id, fields in entries:
-                # get the data field (may be bytes)
-                raw = fields.get(b'data') or fields.get('data')
-                if isinstance(raw, bytes):
-                    raw = raw.decode()
-
-                # parse json and check field
-                data = json.loads(raw)
-                f = data.get(field)
-
-                if f == key:
+            for _, fields in entries:
+                data = self._parse_entry_data(fields)
+                if data and data.get(field) == key:
                     return data
-
         except Exception as e:
             print(f"Error getting latest entry from stream {stream}: {e}")
         return None
+
+    def get_stream_info(self, stream: str) -> Optional[dict]:
+        """
+        Get stream metadata including length, first/last entry info.
+
+        Args:
+            stream: Stream name to inspect.
+
+        Returns:
+            Dict with stream info or None on error.
+        """
+        try:
+            info = self.redis_db.xinfo_stream(stream)
+            return {
+                'length': info.get('length', 0),
+                'first_entry': info.get('first-entry'),
+                'last_entry': info.get('last-entry'),
+                'groups': info.get('groups', 0),
+            }
+        except Exception as e:
+            print(f"Error getting stream info for {stream}: {e}")
+            return None
+
+    def close(self) -> None:
+        """Close all connections in the pool."""
+        self._pool.disconnect()
 
 class TimeManagement:
 

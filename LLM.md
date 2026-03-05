@@ -1,67 +1,151 @@
-Conversation transcript (visible user <> assistant messages only)
+# LLM Context: aia_utilities
 
----
+This document provides context for AI assistants working with this codebase.
 
-User: i want to make this repo publishable to pypi and instructions how to in the readme
+## Overview
 
-Assistant: I'll read the existing `src/redis_utilities.py` to preserve its contents, then I'll create a proper package layout and add packaging files (`pyproject.toml`, `setup.cfg`, `MANIFEST.in`), a package `__init__.py`, and update `README.md` with PyPI publish instructions. Expected outcome: repo becomes installable and ready to publish to PyPI.
+`aia_utilities` is a Python package providing optimized utilities for Redis Streams and time management, designed for use across Aia microservices.
 
-Assistant: I'll read the existing `src/redis_utilities.py` to preserve its contents, then I'll create a proper package layout and add packaging files (`pyproject.toml`, `setup.cfg`, `MANIFEST.in`), a package `__init__.py`, and update `README.md` with PyPI publish instructions. Expected outcome: repo becomes installable and ready to publish to PyPI.
+## Package Structure
 
-Assistant: I'll create packaging files, a package module, and update README with PyPI instructions
+```
+src/aia_utilities/
+├── __init__.py          # Package exports
+├── aia_utilities.py     # Main utilities module
+tests/
+├── test_redis_utilities.py      # Unit tests (mocked)
+├── test_redis_integration.py    # Integration tests (real Redis)
+```
 
-Assistant (action): Created `pyproject.toml`, `setup.cfg`, `MANIFEST.in`, `src/aia_utilities/__init__.py`, and moved/created `src/aia_utilities/redis_utilities.py`; updated `README.md` with publishing instructions. Removed duplicate top-level `src/redis_utilities.py`.
+## Core Classes
 
-Assistant (checkpoint): I created packaging files and a package under `src/aia_utilities`. Next I'll remove the original standalone `src/redis_utilities.py` to avoid duplication and update README was already updated; then I'll run a quick build to verify packaging works. I'll delete the old file now.
+### RedisUtilities
 
-Assistant (action): Installed build tools and ran a local build; the build succeeded and created both sdist and wheel in `dist/`.
+A high-performance Redis Streams client with connection pooling and batch operations.
 
-Assistant (final summary): I'll make the repo publishable to PyPI: I created a standard src-layout package, added packaging metadata, and updated the README with publishing instructions — next I'll summarize what changed and how to build & upload.
+**Key Features:**
+- Connection pooling (configurable pool size)
+- Pipelined batch writes and deletes
+- JSON serialization/deserialization built-in
+- Exponential backoff on errors
+- Approximate stream trimming for bounded memory
 
-Assistant (summary details):
-- Checklist of changes and files added (pyproject.toml, setup.cfg, MANIFEST.in, src/aia_utilities, README updates)
-- Build verification: sdist + wheel created
-- How to build and upload commands
-- Notes and assumptions (package name, python_requires, install_requires)
-- Next steps suggestions (GitHub Actions, tests)
+**Initialization:**
+```python
+from aia_utilities import RedisUtilities
 
-User: [provided twine upload output showing a 403 Forbidden error when uploading to Test PyPI]
+# Default: localhost:6379, db 0, pool of 10 connections
+ru = RedisUtilities()
 
-Assistant: I'll read the `README.md` to append a Troubleshooting section explaining the 403 auth error and show safe ways to use Test PyPI tokens (env vars and `~/.pypirc`), then I'll update the file. Expected outcome: README contains clear steps to fix the 403 upload error.
+# Custom config
+ru = RedisUtilities(host='redis.example.com', port=6380, db=2, max_connections=20)
+```
 
-Assistant (action): Read current `README.md` and replaced it with expanded content. Added Troubleshooting section covering 403 cause, creating tokens, usage via env vars and `~/.pypirc`, and recommended commands.
+**Methods:**
 
-Assistant (checkpoint): README updated with troubleshooting instructions for 403; next I will show quick guidance to verify token and rerun the upload — no further repo changes required.
+| Method | Description | Returns |
+|--------|-------------|---------|
+| `write(stream, value, maxlen)` | Write a dict to stream | Entry ID or None |
+| `write_batch(stream, values, maxlen)` | Write multiple dicts using pipeline | Count written |
+| `read_all(stream, order=True, count=None)` | Read all/N entries | List of dicts |
+| `read_each(stream, start_id='0-0', block_ms=1000)` | Generator yielding new entries | Generator |
+| `get_latest(stream, field, key)` | Get newest entry matching field=key | Dict or None |
+| `clear(stream, field, key, batch_size=1000)` | Delete entries where field=key | Count deleted |
+| `delete(stream)` | Delete entire stream | bool |
+| `show(stream, sample=5)` | Print stream info and samples | None |
+| `get_stream_info(stream)` | Get stream metadata | Dict or None |
+| `close()` | Close connection pool | None |
 
-Assistant (summary): I updated `README.md` with build/upload steps, Test PyPI notes, and troubleshooting steps (including env var and `~/.pypirc` examples). I explained probable causes of 403 and how to fix them.
+**Stream Data Format:**
+All data is stored as JSON in the `data` field of stream entries:
+```
+Stream entry: {b'data': b'{"timestamp": "2026-01-01", "price": 100.5}'}
+```
 
-User: how to publish to real pipy
+**Common Usage Patterns:**
 
-Assistant: I'll give a concise, ready-to-follow plan for publishing your package to real PyPI and the exact commands to run next.
+```python
+# Write price data
+ru.write('prices', {'timestamp': '2026-01-01 10:00:00', 'symbol': 'AAPL', 'price': 150.25}, maxlen=10000)
 
-Assistant (plan):
-- Quick checklist of what must be true
-- Step-by-step commands to build and upload to PyPI
-- How to create/use an API token (env or ~/.pypirc)
-- Common failure causes and a minimal GitHub Actions example (optional)
+# Batch write (much faster for bulk inserts)
+prices = [{'timestamp': t, 'price': p} for t, p in data]
+ru.write_batch('prices', prices, maxlen=10000)
 
-Assistant (instructions):
-- Bump version in `setup.cfg` and `src/aia_utilities/__init__.py`.
-- Build: `python -m pip install --upgrade build twine` then `python -m build`
-- Create PyPI API token at https://pypi.org/manage/account/#api-tokens
-- Upload with env vars or `~/.pypirc` using username `__token__` and password equal to the token.
-- Verify install with `pip install --upgrade aia-utilities` and a small import test.
+# Read all prices, sorted by timestamp
+all_prices = ru.read_all('prices', order=True)
 
-Assistant (notes):
-- Common errors: 403 Forbidden (wrong token or endpoint), name collision, version already published, long_description issues.
-- Optional: GitHub Actions workflow example to publish on tag using a `PYPI_API_TOKEN` secret.
+# Stream new prices as they arrive
+for price in ru.read_each('prices', start_id='$'):  # '$' = only new entries
+    process(price)
 
-User: (ran `pip install aia-utilities` successfully; showed exit code 0)
+# Get latest price for a symbol
+latest = ru.get_latest('prices', 'symbol', 'AAPL')
 
-User: create a file called LLM.md and paste everything that happened so far interacting with you
+# Remove all entries for a symbol
+deleted = ru.clear('prices', 'symbol', 'AAPL')
+```
 
-Assistant: I'll create `LLM.md` containing the visible user-assistant transcript so far (user prompts and assistant replies) as a chronological record. Expected outcome: new file `/Users/code/source/aia_utilities/LLM.md` added to the repo.
+### TimeManagement
 
----
+Utilities for timezone conversions between UTC and America/New_York.
 
-End of transcript.
+**Methods:**
+- `datetime_to_string(timestamp)` - Convert datetime to string with microseconds
+- `convert_utc_to_ny(utc_time_str)` - Convert ISO-8601 UTC to naive NY datetime string
+- `utc_to_ny(utc_date_string, with_microseconds=True)` - Convert UTC string to NY string
+- `get_ny_utc_offset(date_string)` - Get UTC offset hours (-5 EST, -4 EDT)
+- `string_to_datetime(date_string)` - Parse ISO-8601 string to datetime
+
+### Helpers
+
+Miscellaneous utility functions.
+
+**Methods:**
+- `say_nonblocking(text, voice=None, volume=2)` - macOS text-to-speech in background thread
+- `updown(direction)` - Returns 'up', 'down', or None for numeric direction
+
+## Testing
+
+**Unit tests (mocked Redis):**
+```bash
+pytest tests/test_redis_utilities.py -v
+```
+
+**Integration tests (requires running Redis):**
+```bash
+pytest tests/test_redis_integration.py -v -s
+```
+
+## Dependencies
+
+- `redis` - Redis client
+- `pandas` - Data manipulation
+- `pytz` - Timezone handling
+
+## Common Tasks for AI Assistants
+
+### Adding a new RedisUtilities method
+1. Add method to `RedisUtilities` class in `src/aia_utilities/aia_utilities.py`
+2. Use `_parse_entry_data()` and `_decode_entry_id()` helpers for consistency
+3. Add corresponding unit test in `tests/test_redis_utilities.py`
+4. Use `self.redis_db.pipeline()` for batch operations
+
+### Modifying stream data format
+The `data` field contains JSON. Always use `json.dumps()` for writing and `_parse_entry_data()` for reading.
+
+### Error handling pattern
+```python
+try:
+    result = self.redis_db.some_operation()
+except Exception as e:
+    print(f"Error description: {e}")
+    return None  # or empty list, or 0, as appropriate
+```
+
+## Architecture Notes
+
+- Uses Redis Streams exclusively (XADD, XREAD, XRANGE, XREVRANGE)
+- Connection pooling via `redis.ConnectionPool`
+- All public methods include type hints
+- Stream trimming is approximate (`approximate=True`) for performance

@@ -18,23 +18,24 @@ class RedisUtilities:
     and optimized batch operations.
     """
 
-    def __init__(self, host: str = 'localhost', port: int = 6379, db: int = 0,
+    def __init__(self, host: str = None, port: int = None, db: int = 0,
                  max_connections: int = 10, decode_responses: bool = False):
         """
         Initialize the RedisUtilities instance with connection pooling.
 
         Args:
-            host: Redis server host.
-            port: Redis server port.
+            host: Redis server host. Defaults to REDIS_HOST env var or 'localhost'.
+            port: Redis server port. Defaults to REDIS_PORT env var or 6379.
             db: Redis database number.
             max_connections: Maximum connections in the pool.
             decode_responses: Whether to decode bytes to strings automatically.
         """
-        self.host = host
-        self.port = port
+        import os
+        self.host = host or os.environ.get('REDIS_HOST', 'localhost')
+        self.port = port or int(os.environ.get('REDIS_PORT', '6379'))
         self.db = db
         self._pool = redis.ConnectionPool(
-            host=host, port=port, db=db,
+            host=self.host, port=self.port, db=db,
             max_connections=max_connections,
             decode_responses=decode_responses
         )
